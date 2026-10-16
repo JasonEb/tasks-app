@@ -1,0 +1,16 @@
+{
+  "name": "tasks-app",
+  "private": true,
+  "workspaces": [
+    "packages/*"
+  ],
+  "scripts": {
+    "lint": "oxlint .",
+    "format": "prettier --write ."
+  },
+  "devDependencies": {
+    "oxlint": "^1.88.0",
+    "oxlint-tsgolint": "^7.0.2004",
+    "prettier": "^3.9.10"
+  }
+}

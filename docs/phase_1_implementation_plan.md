@@ -262,8 +262,8 @@ import { AuthGuard } from '@nestjs/passport';
 
 @Injectable()
 export class OptionalJwtAuthGuard extends AuthGuard('jwt') {
-  handleRequest(err: unknown, user: unknown) {
-    return user ?? null; // never throws; req.user is null instead of 401
+  handleRequest<TUser = any>(err: any, user: any): TUser {
+    return (user ?? null) as TUser; // never throws; req.user is null instead of 401
   }
 
   canActivate(context: ExecutionContext) {
@@ -271,6 +271,8 @@ export class OptionalJwtAuthGuard extends AuthGuard('jwt') {
   }
 }
 ```
+
+**Why `handleRequest` is generic (`<TUser = any>`) instead of the more obvious `(err: unknown, user: unknown)`**: `@nestjs/passport`'s `IAuthGuard` interface declares `handleRequest` as a generic method — `<TUser = any>(err, user, info, context, status?) => TUser`. Overriding it with a fixed, concrete return type (`{} | null`, which is what `(err: unknown, user: unknown) => user ?? null` infers to) doesn't type-check, because TypeScript can't verify a fixed-type override satisfies *every* possible instantiation of `TUser` a caller might request — only matching the base method's own generic shape, and casting the return, does. Confirmed by actually compiling both versions against this project's installed `@nestjs/passport` — the version with `unknown` params and no generic fails with `TS2416`; this one doesn't.
 
 **`guards/jwt-auth.guard.ts` gets no spec file.** It's a bare subclass with zero overrides — its entire behavior *is* `AuthGuard('jwt')`'s behavior, already trusted library code:
 ```ts

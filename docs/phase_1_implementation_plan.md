@@ -4,11 +4,11 @@ Follow in order from `packages/server` unless noted. See [architecture.md](./arc
 
 ## Where the tests are
 
-`implementation-plan.md`'s Phase 1 listed tests as a single bullet at the end, naming Jest — that's wrong for this project (confirmed: the `nest new` scaffold uses **Vitest**, not Jest). Fixed in that file. More importantly, "one bullet at the end" undersells it — this phase actually has three separate testing moments, placed where they belong instead of batched at the end:
+`implementation-plan.md`'s Phase 1 listed tests as a single bullet at the end, naming Jest — that's wrong for this project (confirmed: the `nest new` scaffold uses **Vitest**, not Jest). Fixed in that file.
 
-1. **Step 4b** — a unit spec for `TaskAccessGuard`'s pure logic (no HTTP, no real DB), right after the guard is written.
-2. **Step 3b** — a unit spec for `AuthService`'s register/login logic, right after that service is written.
-3. **Step 5** — an e2e spec hitting real HTTP routes with `supertest`, once there's an actual end-to-end flow (register → login → create task → second user reads it) to exercise. This is the one that proves Phase 1's actual "Done when" criterion.
+**This doc is now ordered test-first (TDD) for everything not yet built.** `register.dto.ts`, `login.dto.ts`, `auth.service.ts`, and `auth.service.spec.ts` are already done — built implementation-first, spec written after the fact to describe behavior that already existed. That's noted honestly where it comes up below rather than rewritten into a TDD narrative it didn't actually follow. Everything from `jwt.strategy.ts` onward (still unwritten at time of this update) follows: write the failing spec, watch it fail (can't import a class that doesn't exist yet), then write just enough implementation to pass it.
+
+**Not every file gets a dedicated spec, and forcing one everywhere would be cargo-culting the practice rather than applying it.** TDD earns its keep where there's real logic to drive out — a guard's authorization check, a service method's query-scoping, a strategy's payload mapping. Thin wiring (modules, a guard that's a bare subclass with no overrides, a controller that just calls a service method and returns it) has no behavior of its own to test-drive; those are verified by the Step 6 e2e test instead, which exercises the whole wired-together path. Each piece below says explicitly which category it's in.
 
 Unit specs (`*.spec.ts`) live colocated next to the file they test, in `src/`. E2E specs (`*.e2e-spec.ts`) live in `test/`. Both already work out of the box from the Nest scaffold — `npm run test` / `npm run test:e2e`.
 
@@ -151,84 +151,73 @@ These are consumed as *types only* on the server (the actual runtime validation 
 
 ## Step 4 — `AuthModule`
 
-Files, all under `packages/server/src/auth/`:
+All files under `packages/server/src/auth/`.
 
-**`dto/register.dto.ts`**
+### Already done (implementation-first, not rewritten)
+
+`dto/register.dto.ts`, `dto/login.dto.ts`, `auth.service.ts`, and `auth.service.spec.ts` are built and passing (`npm run test` — 1 passed). These were written before this doc switched to TDD ordering, so the spec came after the implementation it describes rather than driving it. Left as-is rather than rewound and redone purely for narrative consistency — the behavior they prove (register hashes + stores a user; login rejects a wrong password) is correct regardless of which order it was written in.
+
+### Step 4a — `JwtStrategy`: spec first
+
+Real logic lives here — the cookie extractor and the payload-to-`req.user` mapping — so this is where TDD actually earns its keep. Write the spec before the class exists:
+
+**`jwt.strategy.spec.ts`**
 ```ts
-import { IsEmail, IsString, MinLength } from 'class-validator';
+import { JwtStrategy, extractTokenFromCookie } from './jwt.strategy.js';
 
-export class RegisterDto {
-  @IsEmail()
-  email: string;
+describe('JwtStrategy', () => {
+  beforeAll(() => {
+    process.env.JWT_SECRET = 'test-secret';
+  });
 
-  @IsString()
-  @MinLength(8)
-  password: string;
+  it('extracts the token from the cookie', () => {
+    expect(extractTokenFromCookie({ cookies: { access_token: 'abc' } } as any)).toBe('abc');
+    expect(extractTokenFromCookie({ cookies: {} } as any)).toBeNull();
+    expect(extractTokenFromCookie({ cookies: undefined } as any)).toBeNull();
+  });
 
-  @IsString()
-  name: string;
-}
+  it('maps the JWT payload to req.user shape', async () => {
+    const strategy = new JwtStrategy();
+    const result = await strategy.validate({ sub: '123', email: 'a@b.com' });
+    expect(result).toEqual({ id: '123', email: 'a@b.com' });
+  });
+});
 ```
 
-**`dto/login.dto.ts`**
-```ts
-import { IsEmail, IsString } from 'class-validator';
+**Why `extractTokenFromCookie` is imported, not redefined inline**: the first version of this spec wrote the extractor as a local copy, `const extractor = (req: any) => req.cookies?.['access_token'] ?? null`, directly inside the test. That looks reasonable but doesn't actually test `JwtStrategy` at all — it tests an independent duplicate of the logic, so it stays green regardless of what the real class does, even before `jwt.strategy.ts` exists. Exporting the extractor as its own named function from `jwt.strategy.ts`, and having the spec import that exact function, closes the loop: the test now genuinely fails until the real implementation exists, and genuinely breaks later if the real extraction logic changes.
 
-export class LoginDto {
-  @IsEmail()
-  email: string;
+**Why `beforeAll` sets `JWT_SECRET` directly instead of relying on `.env`**: confirmed empirically — Vitest does not load `.env` into `process.env` at all (checked directly: a test asserting on `process.env.JWT_SECRET` printed `undefined` even with the real value sitting in `packages/server/.env`). This is a third independent runtime, alongside the Prisma CLI and the real app via `main.ts`'s `ConfigModule` — none of the three share env-loading with each other (see `debugging-notes.md`'s case log). But setting it in `.env` wouldn't be the right fix here even if Vitest did load it: a unit test shouldn't depend on a real secret value from a file that might not exist in CI or a fresh clone. Setting it directly in `beforeAll` makes the test self-contained and deterministic regardless of `.env`'s contents.
 
-  @IsString()
-  password: string;
-}
+Run it (`npx vitest run src/auth/jwt.strategy.spec.ts`) and watch it fail — `jwt.strategy.ts` doesn't export either name yet. That failure is expected and correct; it's the "red" in red-green-refactor.
+
+**You'll still need `JWT_SECRET` in `packages/server/.env` separately** — not for this spec (handled by `beforeAll` above), but for the real app: `AuthModule`'s `JwtModule.register({ secret: process.env.JWT_SECRET, ... })` in Step 4c needs it to actually sign tokens outside of tests.
+```
+JWT_SECRET=<some long random string>
 ```
 
-**`auth.service.ts`** — register hashes the password and creates the user; login verifies it and signs a JWT:
-```ts
-import { Injectable, UnauthorizedException } from '@nestjs/common';
-import { JwtService } from '@nestjs/jwt';
-import * as bcrypt from 'bcrypt';
-import { PrismaService } from '../prisma/prisma.service.js';
-import { RegisterDto } from './dto/register.dto.js';
-import { LoginDto } from './dto/login.dto.js';
+Now the implementation, written just to make the spec pass:
 
-@Injectable()
-export class AuthService {
-  constructor(
-    private readonly prisma: PrismaService,
-    private readonly jwt: JwtService,
-  ) {}
-
-  async register(dto: RegisterDto) {
-    const passwordHash = await bcrypt.hash(dto.password, 10);
-    return this.prisma.user.create({
-      data: { email: dto.email, passwordHash, name: dto.name },
-    });
-  }
-
-  async login(dto: LoginDto) {
-    const user = await this.prisma.user.findUnique({ where: { email: dto.email } });
-    if (!user || !(await bcrypt.compare(dto.password, user.passwordHash))) {
-      throw new UnauthorizedException('Invalid credentials');
-    }
-    return this.jwt.signAsync({ sub: user.id, email: user.email });
-  }
-}
-```
-
-**`jwt.strategy.ts`** — reads the token from the cookie, not an `Authorization` header:
+**`jwt.strategy.ts`** — reads the token from the cookie, not an `Authorization` header. The extractor is its own exported function specifically so the spec above can import and test it directly, rather than a copy of it. The constructor guards `secretOrKey` with an early throw rather than passing `process.env.JWT_SECRET` straight through — `process.env.X` is typed `string | undefined` (an env var might not exist), but `passport-jwt`'s types require a real `string | Buffer`; the throw both narrows the type (TypeScript understands `secretOrKey` is `string` after the guard) and turns a confusing error from deep inside `passport-jwt`'s internals into a clear one pointing at the actual missing env var:
 ```ts
 import { Injectable } from '@nestjs/common';
 import { PassportStrategy } from '@nestjs/passport';
 import { Strategy } from 'passport-jwt';
 import type { Request } from 'express';
 
+export function extractTokenFromCookie(req: Request): string | null {
+  return req.cookies?.['access_token'] ?? null;
+}
+
 @Injectable()
 export class JwtStrategy extends PassportStrategy(Strategy) {
   constructor() {
+    const secretOrKey = process.env.JWT_SECRET;
+    if (!secretOrKey) {
+      throw new Error('JWT_SECRET is not set');
+    }
     super({
-      jwtFromRequest: (req: Request) => req.cookies?.['access_token'] ?? null,
-      secretOrKey: process.env.JWT_SECRET,
+      jwtFromRequest: extractTokenFromCookie,
+      secretOrKey,
     });
   }
 
@@ -238,16 +227,33 @@ export class JwtStrategy extends PassportStrategy(Strategy) {
 }
 ```
 
-**`guards/jwt-auth.guard.ts`** and **`guards/optional-jwt-auth.guard.ts`** — two guards, not one. Architecture.md §7 marks several routes "optional" auth (viewing a public task needs no login). The standard `AuthGuard('jwt')` throws `401` when there's no token at all, which breaks anonymous public-task viewing. The fix is a second guard that attempts auth but never rejects:
+Re-run the spec — should be green now.
 
+**Not unit-tested, deliberately**: whether `passport-jwt` actually verifies a JWT's signature correctly. That's testing a trusted third-party library's own correctness, not this project's code — not this project's job to re-prove. Whether an invalid/expired/missing token produces a real `401` on a real route is an integration concern, proven by Step 6's e2e test instead.
+
+### Step 4b — Guards: spec first for the one with logic, no spec for the one without
+
+Architecture.md §7 marks several routes "optional" auth (viewing a public task needs no login). The standard `AuthGuard('jwt')` throws `401` when there's no token at all, which breaks anonymous public-task viewing — so there are two guards, and they're not equally testable.
+
+**`guards/optional-jwt-auth.guard.spec.ts`** — this one overrides `handleRequest` to swallow the "no token" case instead of throwing; that override is exactly the behavior worth driving with a test:
 ```ts
-// guards/jwt-auth.guard.ts
-import { Injectable } from '@nestjs/common';
-import { AuthGuard } from '@nestjs/passport';
+import { OptionalJwtAuthGuard } from './optional-jwt-auth.guard.js';
 
-@Injectable()
-export class JwtAuthGuard extends AuthGuard('jwt') {}
+describe('OptionalJwtAuthGuard', () => {
+  it('returns null instead of throwing when there is no user', () => {
+    const guard = new OptionalJwtAuthGuard();
+    expect(guard.handleRequest(null, null)).toBeNull();
+  });
+
+  it('passes a real user through unchanged', () => {
+    const guard = new OptionalJwtAuthGuard();
+    const user = { id: '1', email: 'a@b.com' };
+    expect(guard.handleRequest(null, user)).toBe(user);
+  });
+});
 ```
+
+Watch it fail (no `optional-jwt-auth.guard.ts` yet), then write just enough to pass:
 
 ```ts
 // guards/optional-jwt-auth.guard.ts
@@ -266,9 +272,24 @@ export class OptionalJwtAuthGuard extends AuthGuard('jwt') {
 }
 ```
 
+**`guards/jwt-auth.guard.ts` gets no spec file.** It's a bare subclass with zero overrides — its entire behavior *is* `AuthGuard('jwt')`'s behavior, already trusted library code:
+```ts
+// guards/jwt-auth.guard.ts
+import { Injectable } from '@nestjs/common';
+import { AuthGuard } from '@nestjs/passport';
+
+@Injectable()
+export class JwtAuthGuard extends AuthGuard('jwt') {}
+```
+Writing a spec that constructs this and asserts it's an instance of `AuthGuard` would test TypeScript's `class`/`extends` keywords, not anything this project wrote. Skipped deliberately, not forgotten.
+
 This pair matters beyond auth — `TaskAccessGuard` in Step 5 relies on `OptionalJwtAuthGuard` having already run, so it can check `req.user` for ownership *or* let anonymous requests through to public tasks.
 
-**`auth.controller.ts`** — sets/clears the httpOnly cookie:
+### Step 4c — `AuthController` and `AuthModule`: no dedicated spec, wiring only
+
+Both are thin: the controller calls straight into the already-tested `AuthService` and sets/reads a cookie (no branching logic of its own); the module is pure DI registration. Neither has behavior worth test-driving in isolation — both are exercised for real by Step 6's e2e test, which is a stronger proof than a unit spec mocking `AuthService` would be here.
+
+**`auth.controller.ts`**:
 ```ts
 import { Body, Controller, Post, Res } from '@nestjs/common';
 import type { Response } from 'express';
@@ -323,87 +344,17 @@ import { OptionalJwtAuthGuard } from './guards/optional-jwt-auth.guard.js';
 export class AuthModule {}
 ```
 
-Add `AuthModule` to `AppModule`'s `imports`, same as `PrismaModule` in Phase 0. Also add `JWT_SECRET=<some long random string>` to `packages/server/.env`.
-
-### Step 4b — Unit test: `auth.service.spec.ts`
-
-Colocated at `packages/server/src/auth/auth.service.spec.ts`. Mock `PrismaService` and `JwtService` — this test has no business touching a real database:
-
-```ts
-import { Test } from '@nestjs/testing';
-import { AuthService } from './auth.service.js';
-import { PrismaService } from '../prisma/prisma.service.js';
-import { JwtService } from '@nestjs/jwt';
-
-describe('AuthService', () => {
-  it('rejects login with wrong password', async () => {
-    const prismaMock = {
-      user: { findUnique: async () => ({ id: '1', email: 'a@b.com', passwordHash: await (await import('bcrypt')).hash('correct', 10) }) },
-    };
-    const module = await Test.createTestingModule({
-      providers: [
-        AuthService,
-        { provide: PrismaService, useValue: prismaMock },
-        { provide: JwtService, useValue: { signAsync: async () => 'token' } },
-      ],
-    }).compile();
-
-    const service = module.get(AuthService);
-    await expect(service.login({ email: 'a@b.com', password: 'wrong' })).rejects.toThrow();
-  });
-});
-```
+Add `AuthModule` to `AppModule`'s `imports`, same as `PrismaModule` in Phase 0.
 
 ## Step 5 — `TasksModule`
 
-Files under `packages/server/src/tasks/`:
+Files under `packages/server/src/tasks/`. Same split as Step 4: real logic gets a spec written first, thin wiring doesn't.
 
-**`dto/create-task.dto.ts`** — validates against the same `TaskVisibility` enum Step 1 added to `schema.prisma`, imported from the generated client, instead of a separately hardcoded list that could drift out of sync with it:
-```ts
-import { IsEnum, IsOptional, IsString } from 'class-validator';
-import { TaskVisibility } from '../../generated/prisma/client.js';
+### Step 5a — `TaskAccessGuard`: spec first
 
-export class CreateTaskDto {
-  @IsString()
-  title: string;
+This is the test that matters most in the whole phase — it's the one that actually proves architecture.md §8's authorization rule holds. Write it before the guard exists:
 
-  @IsOptional()
-  @IsString()
-  description?: string;
-
-  @IsEnum(TaskVisibility)
-  visibility: TaskVisibility;
-}
-```
-
-`@IsEnum()` needs a real runtime object to check against (it calls `Object.values()` on whatever you pass it), which is exactly what Prisma generates for an `enum` block — unlike the plain string-literal union types in `packages/shared`, which have no runtime representation at all and couldn't be used here.
-
-**`guards/task-access.guard.ts`** — architecture.md §8's rule, implemented once:
-```ts
-import { CanActivate, ExecutionContext, Injectable, NotFoundException } from '@nestjs/common';
-import { PrismaService } from '../../prisma/prisma.service.js';
-
-@Injectable()
-export class TaskAccessGuard implements CanActivate {
-  constructor(private readonly prisma: PrismaService) {}
-
-  async canActivate(context: ExecutionContext): Promise<boolean> {
-    const req = context.switchToHttp().getRequest();
-    const task = await this.prisma.task.findUnique({ where: { id: req.params.id } });
-    if (!task) throw new NotFoundException();
-
-    req.task = task; // avoids a second query in the handler
-    return task.visibility === 'public' || task.ownerId === req.user?.id;
-  }
-}
-```
-
-This guard must run *after* `OptionalJwtAuthGuard` on any route that uses it, so `req.user` is already populated (or `null`) by the time it checks ownership. `@UseGuards(OptionalJwtAuthGuard, TaskAccessGuard)`, in that order — Nest runs guards left to right.
-
-### Step 5b — Unit test: `task-access.guard.spec.ts`
-
-This is the test that matters most for proving §8's rule actually holds. Colocated at `packages/server/src/tasks/guards/task-access.guard.spec.ts`, covering all combinations without any HTTP or real database involved:
-
+**`guards/task-access.guard.spec.ts`**, covering every combination without any HTTP or real database involved:
 ```ts
 import { TaskAccessGuard } from './task-access.guard.js';
 import { ExecutionContext } from '@nestjs/common';
@@ -435,9 +386,90 @@ describe('TaskAccessGuard', () => {
 });
 ```
 
-Six cases, directly matching the authorization matrix named in `implementation-plan.md`'s Phase 1 "Done when" line and Phase 1's test bullet ("owner vs stranger vs anonymous, public vs private").
+Six cases, directly matching the authorization matrix named in `implementation-plan.md`'s Phase 1 "Done when" line. Run it, watch all six fail (no `task-access.guard.ts` yet), then write just enough to turn them green:
 
-**`tasks.service.ts`** — note the query itself is scoped, not just the guard (architecture.md §10: "scoped... at the data-access layer, not just the route layer"):
+**`guards/task-access.guard.ts`**:
+```ts
+import { CanActivate, ExecutionContext, Injectable, NotFoundException } from '@nestjs/common';
+import { PrismaService } from '../../prisma/prisma.service.js';
+
+@Injectable()
+export class TaskAccessGuard implements CanActivate {
+  constructor(private readonly prisma: PrismaService) {}
+
+  async canActivate(context: ExecutionContext): Promise<boolean> {
+    const req = context.switchToHttp().getRequest();
+    const task = await this.prisma.task.findUnique({ where: { id: req.params.id } });
+    if (!task) throw new NotFoundException();
+
+    req.task = task; // avoids a second query in the handler
+    return task.visibility === 'public' || task.ownerId === req.user?.id;
+  }
+}
+```
+
+This guard must run *after* `OptionalJwtAuthGuard` on any route that uses it, so `req.user` is already populated (or `null`) by the time it checks ownership. `@UseGuards(OptionalJwtAuthGuard, TaskAccessGuard)`, in that order — Nest runs guards left to right.
+
+### Step 5b — `TasksService`: spec first
+
+Real logic here too — architecture.md §10 requires visibility to be scoped "at the data-access layer, not just the route layer," meaning `findAllVisibleTo`'s query-building is itself a rule worth driving with a test, not just something the guard happens to also check:
+
+**`tasks.service.spec.ts`**:
+```ts
+import { Test } from '@nestjs/testing';
+import { TasksService } from './tasks.service.js';
+import { PrismaService } from '../prisma/prisma.service.js';
+
+describe('TasksService', () => {
+  it('includes the caller\'s own tasks alongside public ones when logged in', async () => {
+    let capturedWhere: unknown;
+    const prismaMock = {
+      task: {
+        findMany: async (args: { where: unknown }) => {
+          capturedWhere = args.where;
+          return [];
+        },
+      },
+    };
+
+    const module = await Test.createTestingModule({
+      providers: [TasksService, { provide: PrismaService, useValue: prismaMock }],
+    }).compile();
+
+    const service = module.get(TasksService);
+    await service.findAllVisibleTo('user-1');
+
+    expect(capturedWhere).toEqual({
+      OR: [{ visibility: 'public' }, { ownerId: 'user-1' }],
+    });
+  });
+
+  it('only queries public tasks when the caller is anonymous', async () => {
+    let capturedWhere: unknown;
+    const prismaMock = {
+      task: {
+        findMany: async (args: { where: unknown }) => {
+          capturedWhere = args.where;
+          return [];
+        },
+      },
+    };
+
+    const module = await Test.createTestingModule({
+      providers: [TasksService, { provide: PrismaService, useValue: prismaMock }],
+    }).compile();
+
+    const service = module.get(TasksService);
+    await service.findAllVisibleTo(undefined);
+
+    expect(capturedWhere).toEqual({ OR: [{ visibility: 'public' }] });
+  });
+});
+```
+
+Watch both fail (no `tasks.service.ts` yet), then implement:
+
+**`tasks.service.ts`**:
 ```ts
 import { Injectable } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service.js';
@@ -458,6 +490,30 @@ export class TasksService {
   }
 }
 ```
+
+### Step 5c — `CreateTaskDto`, `TasksController`, `TasksModule`: no dedicated spec
+
+`CreateTaskDto` is declarative — the decorators *are* the specification, not something with independent logic to drive. If you want a sanity check comparable to the one run on `RegisterDto` earlier, the same `plainToInstance` + `validate()` recipe (see `docs/debugging-notes.md`'s "Useful commands") applies, but it's not a committed spec file. `TasksController` is thin — delegates straight to the already-tested `TasksService`, no branching of its own — and `TasksModule` is pure wiring. All three are exercised for real by Step 6's e2e test.
+
+**`dto/create-task.dto.ts`** — validates against the same `TaskVisibility` enum Step 1 added to `schema.prisma`, imported from the generated client, instead of a separately hardcoded list that could drift out of sync with it:
+```ts
+import { IsEnum, IsOptional, IsString } from 'class-validator';
+import { TaskVisibility } from '../../generated/prisma/client.js';
+
+export class CreateTaskDto {
+  @IsString()
+  title: string;
+
+  @IsOptional()
+  @IsString()
+  description?: string;
+
+  @IsEnum(TaskVisibility)
+  visibility: TaskVisibility;
+}
+```
+
+`@IsEnum()` needs a real runtime object to check against (it calls `Object.values()` on whatever you pass it), which is exactly what Prisma generates for an `enum` block — unlike the plain string-literal union types in `packages/shared`, which have no runtime representation at all and couldn't be used here.
 
 **`tasks.controller.ts`**
 ```ts
@@ -514,6 +570,8 @@ Add `TasksModule` to `AppModule`'s `imports` too.
 
 `packages/server/test/tasks.e2e-spec.ts` — boots the real `AppModule`, hits real HTTP routes with `supertest`, proving the exact scenario from `implementation-plan.md`: *"a user can register, log in, create a task, and a second user can see it only if it's public."*
 
+**On TDD ordering, this one's different from Steps 4–5 above**: in strict outside-in TDD, an acceptance test like this is often written *first*, before any of the units underneath it exist, as the single "red" test the whole feature is driving toward — everything in Steps 4 and 5 would then exist specifically to turn this one green. It's placed last here instead because it genuinely can't run meaningfully before `AuthModule` and `TasksModule` are registered in `AppModule` (it'd just 404 on every request, which isn't a useful "red" — it's not even reaching the code being tested). If you want the more textbook outside-in flow, there's nothing stopping you from writing this file now, confirming it fails for the *right* reason (404, not a crash), and treating it as the target the rest of this step is working toward.
+
 ```ts
 import { Test, TestingModule } from '@nestjs/testing';
 import { INestApplication } from '@nestjs/common';
@@ -565,6 +623,6 @@ Not resolved here — flagging it the same way `implementation-plan.md`'s "Open 
 ## Done when
 
 - `npx prisma migrate dev --name add_core_models` runs clean, `users`/`tasks`/`comments` tables exist
-- `npm run test` passes, including `task-access.guard.spec.ts`'s six-case matrix and `auth.service.spec.ts`
+- `npm run test` passes: `auth.service.spec.ts`, `jwt.strategy.spec.ts`, `optional-jwt-auth.guard.spec.ts`, `task-access.guard.spec.ts`'s six-case matrix, and `tasks.service.spec.ts`
 - `npm run test:e2e` passes once the test-database decision above is resolved
 - A user can register, log in (receives the httpOnly cookie), create a task, and a second user can see it only if it's public — matching `implementation-plan.md`'s Phase 1 "Done when" line exactly

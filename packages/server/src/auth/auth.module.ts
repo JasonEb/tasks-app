@@ -13,7 +13,7 @@ import { OptionalJwtAuthGuard } from './guards/optional-jwt-auth.guard.js';
         JwtModule.register({ secret: process.env.JWT_SECRET, signOptions: { expiresIn: '1d' }}),
     ],
     controllers: [AuthController],
-    providers: [AuthService], JwtStrategy, JwtAuthGuard, OptionalJwtAuthGuard],
+    providers: [AuthService, JwtStrategy, JwtAuthGuard, OptionalJwtAuthGuard],
     exports: [JwtAuthGuard, OptionalJwtAuthGuard]
 })
 export class AuthModule {}

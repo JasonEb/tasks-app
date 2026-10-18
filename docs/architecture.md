@@ -80,23 +80,30 @@ users
 
 tasks
   id          uuid PK
-  owner_id    uuid FK -> users.id
+  owner_id    uuid FK -> users.id on delete restrict
   title       text not null
   description text
-  status      text not null check (status in ('todo','in_progress','done'))
-  visibility  text not null check (visibility in ('public','private')) default 'private'
+  status      task_status enum ('todo','in_progress','done') not null default 'todo'
+  visibility  task_visibility enum ('public','private') not null default 'private'
   created_at  timestamptz not null default now()
   updated_at  timestamptz not null default now()
 
 comments
   id          uuid PK
   task_id     uuid FK -> tasks.id on delete cascade
-  author_id   uuid FK -> users.id
+  author_id   uuid FK -> users.id on delete set null, nullable
   body        text not null
   created_at  timestamptz not null default now()
 ```
 
 Indexes: `tasks(owner_id)`, `tasks(visibility)`, `comments(task_id, created_at)`.
+
+`status` and `visibility` are native Postgres enum types (`CREATE TYPE ... AS ENUM`), declared in Prisma as `enum TaskStatus { todo in_progress done }` / `enum TaskVisibility { public private }` rather than `text` with a `CHECK` constraint — Prisma's schema language can't express a raw `CHECK`, but enums give the same guarantee (the column itself rejects any value outside the set, enforced by Postgres regardless of what wrote to it) without hand-maintained SQL. Request-body validation (`class-validator`'s `@IsEnum()`, see implementation plan) still happens at the DTO layer on top of this — the enum is the hard guarantee at the database layer, DTO validation is what turns a bad request into a clean `400` instead of a raw constraint-violation error.
+
+**Two different `ON DELETE` behaviors for the two foreign keys pointing at `users`, deliberately not the same policy:**
+
+- `tasks.owner_id` is `RESTRICT` — deleting a user fails while they still own any tasks. A public task can carry comments from other people; cascading the delete would silently destroy those other users' contributions as a side effect of one account going away. `RESTRICT` forces an explicit decision (reassign ownership, or confirm a deliberate bulk delete) instead of letting it happen implicitly.
+- `comments.author_id` is `SET NULL` (and nullable) — deleting a user does not delete their comments; it just detaches authorship, the same pattern most forums/comment systems use (content outlives the individual commenter). `RESTRICT` here would mean a user can never delete their account once they've left a single comment on anyone's task, anywhere — impractical for a real "delete my account" flow. The tradeoff: anywhere comments are read, `author` can now be `null` and has to be handled (e.g. displayed as "[deleted user]") — not an issue yet since nothing reads comments in application code so far, but it will be once `CommentsModule` (Phase 2) exists.
 
 ## 6. Real-Time Design
 

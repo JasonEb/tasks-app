@@ -21,7 +21,7 @@ Phased so each phase ends with something runnable and testable. See [architectur
 - [ ] `shared` package: plain TS interfaces for Task, Comment, and request/response bodies
 - [ ] `AuthModule`: register, login, logout controllers; `@nestjs/jwt` for issuing tokens, a `passport-jwt` strategy reading the JWT from the httpOnly cookie
 - [ ] `TasksModule`: CRUD controller + service; authorization rule from architecture.md §8 implemented once as `TaskAccessGuard` (a Nest `CanActivate`), not duplicated per-route
-- [ ] Integration tests (Nest's `@nestjs/testing` + Jest + supertest) for authorization edge cases (owner vs stranger vs anonymous, public vs private)
+- [ ] Integration tests (Nest's `@nestjs/testing` + Vitest + supertest — this project's scaffold uses Vitest, not Jest) for authorization edge cases (owner vs stranger vs anonymous, public vs private)
 
 **Done when:** a user can register, log in, create a task, and a second user can see it only if it's public.
 

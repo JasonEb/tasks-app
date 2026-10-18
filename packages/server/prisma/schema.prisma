@@ -56,8 +56,8 @@ model Comment {
   id        String   @id @default(uuid())
   taskId    String
   task      Task     @relation(fields: [taskId], references: [id], onDelete: Cascade)
-  authorId  String
-  author    User     @relation(fields: [authorId], references: [id])
+  authorId  String?
+  author    User?    @relation(fields: [authorId], references: [id], onDelete: SetNull)
   body      String
   createdAt DateTime @default(now())
 

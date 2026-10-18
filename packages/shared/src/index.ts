@@ -15,7 +15,7 @@ export interface Task {
 export interface Comment {
     id: string;
     taskId: string;
-    authorId: string;
+    authorId: string | null;
     body: string;
     createdAt: string;
 }

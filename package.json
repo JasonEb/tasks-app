@@ -12,5 +12,10 @@
     "oxlint": "^1.88.0",
     "oxlint-tsgolint": "^7.0.2004",
     "prettier": "^3.9.10"
+  },
+  "allowScripts": {
+    "@prisma/engines@7.10.1": true,
+    "fsevents@2.3.3": true,
+    "prisma@7.10.1": true
   }
 }

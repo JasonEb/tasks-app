@@ -4,13 +4,13 @@ Phased so each phase ends with something runnable and testable. See [architectur
 
 ## Phase 0 — Project Setup
 
-- [ ] `git init`, `.gitignore` (node_modules, .env, dist)
-- [ ] npm/pnpm workspace with `packages/server`, `packages/web`, `packages/shared`
-- [ ] `nest new` inside `packages/server`; install `@nestjs/websockets`, `@nestjs/platform-socket.io`, `@socket.io/redis-adapter`, `ioredis`, `@nestjs/jwt`, `@nestjs/passport`, `passport-jwt`, `@nestjs/config`, `@nestjs/throttler`, `class-validator`, `class-transformer`
-- [ ] TypeScript configs (base `tsconfig.json` + per-package extends)
+- [x] `git init`, `.gitignore` (node_modules, .env, dist)
+- [x] npm/pnpm workspace with `packages/server`, `packages/web`, `packages/shared`
+- [x] `nest new` inside `packages/server`; install `@nestjs/websockets`, `@nestjs/platform-socket.io`, `@socket.io/redis-adapter`, `ioredis`, `@nestjs/jwt`, `@nestjs/passport`, `passport-jwt`, `@nestjs/config`, `@nestjs/throttler`, `class-validator`, `class-transformer`
+- [x] TypeScript configs (base `tsconfig.json` + per-package extends)
 - [x] ESLint + Prettier shared config
-- [ ] Docker Compose: `postgres` service + a named volume, `redis` service (`redis:7-alpine`, `--requirepass` set even locally)
-- [ ] Prisma initialized in `packages/server`, connected to local Postgres, wrapped in a `PrismaService`
+- [x] Docker Compose: `postgres` service + a named volume, `redis` service (`redis:7-alpine`, `--requirepass` set even locally)
+- [x] Prisma initialized in `packages/server`, connected to local Postgres, wrapped in a `PrismaService`
 
 **Done when:** `docker compose up`, `prisma migrate dev` run clean, bare Nest app boots and responds to a health check.
 

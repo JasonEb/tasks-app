@@ -500,7 +500,7 @@ export class TasksService {
 **`dto/create-task.dto.ts`** — validates against the same `TaskVisibility` enum Step 1 added to `schema.prisma`, imported from the generated client, instead of a separately hardcoded list that could drift out of sync with it:
 ```ts
 import { IsEnum, IsOptional, IsString } from 'class-validator';
-import { TaskVisibility } from '../../generated/prisma/client.js';
+import { TaskVisibility } from '../../../generated/prisma/client.js';
 
 export class CreateTaskDto {
   @IsString()

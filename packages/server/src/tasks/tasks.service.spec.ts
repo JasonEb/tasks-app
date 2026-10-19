@@ -23,5 +23,25 @@ describe('TasksService', () => {
 
         expect(capturedWhere).toEqual({
             OR: [{ visibility: 'public' }, { ownerId: 'user-1' }] });
-        });
-    })
+    });
+
+    it('only queries public tasks when the collar is anonymous', async () => {
+        let capturedWhere: unknown; 
+        const prismaMock = {
+            task: {
+                findMany: async (args: { where: unknown }) => {
+                    capturedWhere = args.where;
+                    return [];
+                }
+            }
+        }
+        const module = await Test.createTestingModule({
+            providers: [TasksService, { provide: PrismaService, useValue: prismaMock }],
+        }).compile();
+
+        const service = module.get(TasksService);
+        await service.findAllVisibleTo(undefined);
+
+        expect(capturedWhere).toEqual({ OR: [{ visibility: 'public'}] });
+    });
+});

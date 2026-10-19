@@ -574,15 +574,19 @@ Add `TasksModule` to `AppModule`'s `imports` too.
 
 **On TDD ordering, this one's different from Steps 4–5 above**: in strict outside-in TDD, an acceptance test like this is often written *first*, before any of the units underneath it exist, as the single "red" test the whole feature is driving toward — everything in Steps 4 and 5 would then exist specifically to turn this one green. It's placed last here instead because it genuinely can't run meaningfully before `AuthModule` and `TasksModule` are registered in `AppModule` (it'd just 404 on every request, which isn't a useful "red" — it's not even reaching the code being tested). If you want the more textbook outside-in flow, there's nothing stopping you from writing this file now, confirming it fails for the *right* reason (404, not a crash), and treating it as the target the rest of this step is working toward.
 
+**Prerequisite, easy to miss:** `AuthModule` and `TasksModule` both have to be registered in `AppModule`'s `imports` — same "dead code until imported from the root" rule as `PrismaModule` back in Phase 0. Without both, every route this test hits 404s (no route matched at all), which looks similar to but is a completely different failure from `TaskAccessGuard`'s own legitimate 403/404 responses.
+
 ```ts
 import { Test, TestingModule } from '@nestjs/testing';
 import { INestApplication } from '@nestjs/common';
 import request from 'supertest';
 import cookieParser from 'cookie-parser';
 import { AppModule } from '../src/app.module.js';
+import { PrismaService } from '../src/prisma/prisma.service.js';
 
 describe('Tasks (e2e)', () => {
   let app: INestApplication;
+  let prisma: PrismaService;
 
   beforeAll(async () => {
     const moduleFixture: TestingModule = await Test.createTestingModule({
@@ -591,6 +595,13 @@ describe('Tasks (e2e)', () => {
     app = moduleFixture.createNestApplication();
     app.use(cookieParser());
     await app.init();
+    prisma = app.get(PrismaService);
+  });
+
+  beforeEach(async () => {
+    await prisma.comment.deleteMany();
+    await prisma.task.deleteMany();
+    await prisma.user.deleteMany();
   });
 
   afterAll(() => app.close());
@@ -615,16 +626,59 @@ describe('Tasks (e2e)', () => {
 });
 ```
 
-**Open decision before this runs cleanly in CI or repeatedly locally:** this test writes real rows via the real `PrismaService`, against whatever `DATABASE_URL` the app resolves at test time — currently that's your local dev database. Running it repeatedly will hit the `@unique` constraint on `email` on the second run. Pick one before writing more e2e tests:
-- A separate `tasks_app_test` database (new Postgres DB in the same container, distinct `DATABASE_URL` sourced from a `.env.test`), reset between runs.
-- Wrapping each test in a transaction that's rolled back afterward.
-- Clearing relevant tables in an `afterEach`.
+**Why `beforeAll` builds the app and `beforeEach` only clears data, not the other way round:** `Test.createTestingModule(...).compile()` plus `app.init()` is expensive — full module resolution, every provider's lifecycle hooks, a real Postgres connection pool. That only needs to happen once per file, not once per test, so it's in `beforeAll`. Clearing rows between tests is cheap and genuinely needs to run before every single test, so that part stays in `beforeEach`. `app.get(PrismaService)` pulls the real instance out of the DI container `beforeAll` just built — same mechanism as `module.get(TasksService)` in the unit tests, on the full app's container instead of a narrow test-only one.
 
-Not resolved here — flagging it the same way `implementation-plan.md`'s "Open Decisions" section flags unresolved calls, since it'll block Step 6 from being runnable more than once without a crash.
+**Resolved — separate test database, reset via table-clearing.** This test writes real rows via the real `PrismaService`, against whatever `DATABASE_URL` the app resolves at test time. Running it repeatedly against your local dev database would hit the `@unique` constraint on `email` on the second run, and would also mean every e2e run deletes/mutates data you might be looking at via Prisma Studio or the REPL.
+
+**Why this option over the alternatives:** transaction-wrapping (roll back each test's changes automatically) is the fastest approach but requires every query during a request — across however many services get called — to share one open transaction, which isn't how `PrismaService` is scoped by default; making it work needs a custom test harness or a library like `nestjs-cls`. Real complexity for a speed optimization this project doesn't need yet at one e2e spec. Table-clearing against the *real* dev database works but pollutes data you're actively using elsewhere. A separate database avoids both problems and is simple to set up.
+
+**Setup:**
+
+1. Create the second database, in the same Postgres container:
+```bash
+docker compose exec postgres psql -U tasks_app -d tasks_app -c "CREATE DATABASE tasks_app_test;"
+```
+
+2. `packages/server/.env.test` — use your actual Postgres password here (whatever's in `packages/server/.env`'s `DATABASE_URL`), and include `JWT_SECRET` too: `AuthModule`'s `JwtModule.register({ secret: process.env.JWT_SECRET })` needs it, and `.env.test` is loaded independently from `.env` (see point 4 below), so it won't inherit it otherwise:
+```
+DATABASE_URL="postgresql://tasks_app:<your real password>@localhost:5432/tasks_app_test"
+JWT_SECRET=test-secret
+```
+**If copying this command into a terminal, substitute the real password before running it** — `zsh` interprets unescaped `<`/`>` as redirection operators, so pasting the placeholder literally produces a confusing shell error that has nothing to do with Prisma.
+
+3. Apply migrations to the new database (same migration history, different target — substitute your real password here too):
+```bash
+DATABASE_URL="postgresql://tasks_app:<your real password>@localhost:5432/tasks_app_test" npx prisma migrate deploy
+```
+
+4. **Vitest doesn't load `.env` automatically** — same gap as `debugging-notes.md` case #7 (Vitest is a third independent runtime that doesn't share env-loading with the CLI or the real app). `.env.test` needs to be loaded explicitly for e2e runs specifically. Add a setup file, referenced from `vitest.config.e2e.ts`:
+
+```ts
+// test/setup-e2e.ts
+import { config } from 'dotenv';
+config({ path: '.env.test' });
+```
+
+```ts
+// vitest.config.e2e.ts — add to the existing config
+export default defineConfig({
+  resolve: { tsconfigPaths: true },
+  test: {
+    globals: true,
+    root: './',
+    include: ['**/*.e2e-spec.ts'],
+    setupFiles: ['./test/setup-e2e.ts'],
+  },
+});
+```
+
+5. The data-clearing itself (FK-safe order — comments reference both tasks and users) is already shown inline in the `beforeAll`/`beforeEach` split in the spec above — nothing further to add here.
+
+Table-clearing, not transaction-wrapping, is the right call at this project's current size — worth revisiting only if the e2e suite grows large enough that clearing/re-seeding actually becomes the slow part.
 
 ## Done when
 
 - `npx prisma migrate dev --name add_core_models` runs clean, `users`/`tasks`/`comments` tables exist
 - `npm run test` passes: `auth.service.spec.ts`, `jwt.strategy.spec.ts`, `optional-jwt-auth.guard.spec.ts`, `task-access.guard.spec.ts`'s six-case matrix, and `tasks.service.spec.ts`
-- `npm run test:e2e` passes once the test-database decision above is resolved
-- A user can register, log in (receives the httpOnly cookie), create a task, and a second user can see it only if it's public — matching `implementation-plan.md`'s Phase 1 "Done when" line exactly
+- `npm run test:e2e` passes, and passes again on an immediate re-run (confirms the `beforeEach` cleanup actually works) — verified: both tests pass, twice in a row
+- A user can register, log in (receives the httpOnly cookie), create a task, and a second user can see it only if it's public — matching `implementation-plan.md`'s Phase 1 "Done when" line exactly — verified end-to-end via the real e2e run, not just by reading the code

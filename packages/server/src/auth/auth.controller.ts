@@ -16,6 +16,11 @@ export class AuthController {
     @Post('login')
     async login(@Body() dto: LoginDto, @Res({ passthrough: true}) res: Response) {
         const token = await this.auth.login(dto);
+        res.cookie('access_token', token, {
+            httpOnly: true,
+            secure: process.env.NODE_ENV === 'production',
+            sameSite: 'lax',
+        });
         return { ok: true };
     }
 
